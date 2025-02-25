@@ -1,4 +1,4 @@
-# Блок для изменения входных данных
+# Входные данные
 K = 9
 D = 1497
 k = [
@@ -12,21 +12,18 @@ k = [
   [4, 9, 2, 4, 4, 6],
   [6, 3, 2, 1, 7, 5]
 ]
-m = [1, 2, 4, 5, 9] # Время переключения
+m = [1, 2, 4, 5, 9]
 
-# Проверка корректности входных данных
 raise "Количество конвейеров K должно быть больше 0" unless K > 0
 raise "Количество деталей D должно быть больше 0" unless D > 0
 raise "Количество этапов на всех конвейерах должно быть одинаковым" unless k.all? { |arr| arr.size == k[0].size }
-n = k[0].size # Количество этапов (определяется по первому конвейеру)
+n = k[0].size
 raise "Количество элементов в m должно быть равно n-1" unless m.size == n - 1
 
-# Динамическое программирование с оптимизацией
-prev = k.map { |conveyor| conveyor[0] }.freeze # Начальный этап
+prev = k.map { |conveyor| conveyor[0] }.freeze
 
 (1...n).each do |j|
   current = Array.new(K)
-  # Находим глобальный минимум и второй минимум для предыдущего этапа
   min_prev = prev.min
   min_index = prev.index(min_prev)
   second_min_prev = prev.each_with_index.min_by { |val, i| i == min_index ? Float::INFINITY : val }[0]
@@ -40,13 +37,11 @@ prev = k.map { |conveyor| conveyor[0] }.freeze # Начальный этап
   prev = current
 end
 
-t = prev # Минимальное время для одной детали на каждом конвейере
+t = prev
 
-# Оптимальное распределение деталей
 sum_inv = t.sum { |ti| 1.0 / ti }
 details = Array.new(K, 0)
 
-# Базовое распределение по пропорции
 total_assigned = 0
 t.each_with_index do |ti, i|
   details[i] = ((D * (1.0 / ti)) / sum_inv).floor
@@ -55,7 +50,6 @@ end
 
 remaining = D - total_assigned
 
-# Распределение оставшихся деталей к конвейерам с минимальным (d_i +1)*t_i
 remaining.times do
   min_increment = Float::INFINITY
   best = 0
