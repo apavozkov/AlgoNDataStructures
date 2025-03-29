@@ -1,325 +1,366 @@
-require 'set'
-require 'ruby2d'
 require 'rgeo'
+require 'ruby2d'
+require 'set'
 
-class Grid
-  attr_reader :width, :height, :cell_size, :obstacles, :subcells
+##################################
+### КОНФИГУРАЦИОННЫЕ ПАРАМЕТРЫ ###
+##################################
 
-  def initialize(width, height, cell_size, obstacles)
+MAP_WIDTH = 800
+MAP_HEIGHT = 800
+
+MAX_RECURSION_LEVEL = 6
+START_POINT = [10, 10]
+GOAL_POINT = [790, 790]
+
+OBSTACLES_DATA = [
+  [[0, 97], [0, 300], [372, 300], [243, 97]],
+  [[600, 200], [600, 250], [700, 250], [700, 200]],
+  [[0, 600], [0, 700], [300, 700], [300, 600]],
+  [[500, 100], [500, 150], [600, 150], [600, 100]],
+  [[405, 503], [195, 503], [195, 553], [405, 553]],
+  [[10, 763], [800, 763], [800, 783], [15, 783]],
+  [[400, 400], [800, 400], [800, 700], [300, 745]]
+]
+
+# Настройки отображения
+BACKGROUND_COLOR = 'black'
+CELL_BORDER_COLOR = 'gray'
+OBSTACLE_COLOR = 'red'
+PATH_COLOR = 'blue'
+START_COLOR = 'green'
+GOAL_COLOR = 'yellow'
+PATH_WIDTH = 3
+POINT_RADIUS = 8
+
+# Настройки анимации
+ANIMATION_SPEED = 0.1  
+
+##############################
+### ОСНОВНОЙ КОД ПРОГРАММЫ ###
+##############################
+
+factory = RGeo::Cartesian.factory
+
+class Cell
+  attr_reader :x, :y, :width, :height, :level, :children, :neighbors
+
+  def initialize(x, y, width, height, level = 0)
+    @x = x
+    @y = y
     @width = width
     @height = height
-    @cell_size = cell_size
-    @factory = RGeo::Cartesian.simple_factory
-    @obstacles = obstacles.map { |poly| @factory.polygon(@factory.linear_ring(poly.map { |p| @factory.point(*p) })) }
-    @grid = Array.new((height / cell_size).ceil) { Array.new((width / cell_size).ceil, true) }
-    @subcells = {} 
-    mark_obstacles
-    split_boundary_cells
+    @level = level
+    @children = []
+    @neighbors = []
   end
 
-  def split_boundary_cells
-    @grid.each_with_index do |row, y|
-      row.each_with_index do |cell, x|
-        next unless cell
-        corners = [
-          [x * @cell_size, y * @cell_size],
-          [(x+1) * @cell_size, y * @cell_size],
-          [(x+1) * @cell_size, (y+1) * @cell_size],
-          [x * @cell_size, (y+1) * @cell_size]
-        ]
-        if corners.any? { |cx, cy| @obstacles.any? { |poly| poly.contains?(@factory.point(cx, cy)) } }
-          @subcells[[x, y]] = Array.new(4, false) 
-          4.times do |i|
-            sub_x = x + (i % 2) * 0.5
-            sub_y = y + (i / 2) * 0.5
-            sub_center = [(sub_x + 0.25) * @cell_size, (sub_y + 0.25) * @cell_size]
-            @subcells[[x, y]][i] = @obstacles.none? { |poly| poly.contains?(@factory.point(*sub_center)) }
-          end
-        end
-      end
+  def center
+    [x + width/2.0, y + height/2.0]
+  end
+
+  def corners
+    [
+      [x, y],
+      [x + width, y],
+      [x + width, y + height],
+      [x, y + height]
+    ]
+  end
+
+  def fully_inside_obstacle?(obstacles, factory)
+    corners.all? do |cx, cy|
+      point = factory.point(cx, cy)
+      obstacles.any? { |obstacle| obstacle.contains?(point) }
     end
   end
 
+  def intersects_obstacle?(obstacles, factory)
+    return false if fully_inside_obstacle?(obstacles, factory)
+    
+    points_to_check = [
+      factory.point(x, y),
+      factory.point(x + width, y),
+      factory.point(x + width, y + height),
+      factory.point(x, y + height),
+      factory.point(x + width/2, y + height/2)
+    ]
 
-  def mark_obstacles
-    @obstacles.each do |polygon|
-      envelope = polygon.envelope
-      points = envelope.exterior_ring.points
-      min_x = points.map(&:x).min
-      max_x = points.map(&:x).max
-      min_y = points.map(&:y).min
-      max_y = points.map(&:y).max
-  
-      (min_y..max_y).step(@cell_size) do |y|
-        (min_x..max_x).step(@cell_size) do |x|
-          point = @factory.point(x, y)
-          if polygon.contains?(point)
-            cell_x = (x / @cell_size).floor
-            cell_y = (y / @cell_size).floor
-            @grid[cell_y][cell_x] = false if cell_y < @grid.size && cell_x < @grid[0].size
-          end
-        end
+    points_to_check.each do |point|
+      obstacles.each do |obstacle|
+        return true if obstacle.contains?(point)
       end
     end
-  end
 
-  def neighbors(cell)
-    x, y = cell
-    neighbors = []
-    if x.is_a?(Float) || y.is_a?(Float)
-      base_x = x.floor
-      base_y = y.floor
-      subcell_index = ((x - base_x) * 2).round + ((y - base_y) * 2).round * 2
-      directions = [
-        [0.5, 0], [-0.5, 0], [0, 0.5], [0, -0.5],
-        [0.5, 0.5], [0.5, -0.5], [-0.5, 0.5], [-0.5, -0.5] 
-      ]
+    sides = [
+      [[x, y], [x + width, y]],
+      [[x + width, y], [x + width, y + height]],
+      [[x + width, y + height], [x, y + height]],
+      [[x, y + height], [x, y]]
+    ]
+
+    obstacles.each do |obstacle|
+      obstacle_points = obstacle.exterior_ring.points.map { |p| [p.x, p.y] }
       
-      directions.each do |dx, dy|
-        nx, ny = x + dx, y + dy
-        
-        if (nx - nx.floor).abs < 0.001 && (ny - ny.floor).abs < 0.001
-          nx = nx.round
-          ny = ny.round
-          next unless nx >= 0 && ny >= 0 && nx < @grid[0].size && ny < @grid.size
-          next unless @grid[ny][nx]
-        else
-          base_nx = nx.floor
-          base_ny = ny.floor
-          next unless @subcells.key?([base_nx, base_ny])
+      sides.each do |side_start, side_end|
+        (0...obstacle_points.size).each do |i|
+          obst_start = obstacle_points[i]
+          obst_end = obstacle_points[(i + 1) % obstacle_points.size]
           
-          subcell_idx = ((nx - base_nx) * 2).round + ((ny - base_ny) * 2).round * 2
-          next unless @subcells[[base_nx, base_ny]][subcell_idx]
-        end
-        
-        neighbors << [nx, ny]
-      end
-    else
-      directions = [
-        [1, 0], [-1, 0], [0, 1], [0, -1],
-        [1, 1], [1, -1], [-1, 1], [-1, -1]
-      ]
-      
-      directions.each do |dx, dy|
-        nx, ny = x + dx, y + dy
-        
-        if nx >= 0 && ny >= 0 && nx < @grid[0].size && ny < @grid.size
-          if @subcells.key?([nx, ny])
-            4.times do |i|
-              if @subcells[[nx, ny]][i]
-                sub_x = nx + (i % 2) * 0.5
-                sub_y = ny + (i / 2) * 0.5
-                neighbors << [sub_x, sub_y]
-              end
-            end
-          else
-            neighbors << [nx, ny] if @grid[ny][nx]
+          if segments_intersect?(
+            side_start[0], side_start[1], side_end[0], side_end[1],
+            obst_start[0], obst_start[1], obst_end[0], obst_end[1]
+          )
+            return true
           end
         end
       end
     end
-    
-    neighbors
-  end
-  def heuristic(a, b)
-    ax = a.is_a?(Float) ? a : a[0] + 0.5
-    ay = a.is_a?(Float) ? a : a[1] + 0.5
-    bx = b.is_a?(Float) ? b : b[0] + 0.5
-    by = b.is_a?(Float) ? b : b[1] + 0.5
-    
-    Math.sqrt((ax - bx)**2 + (ay - by)**2)
+
+    false
   end
 
-  def a_star(start, goal)
-    open_set = Set.new([start])
-    came_from = {}
-    g_score = Hash.new(Float::INFINITY)
-    g_score[start] = 0
-    f_score = Hash.new(Float::INFINITY)
-    f_score[start] = heuristic(start, goal)
+  def segments_intersect?(x1, y1, x2, y2, x3, y3, x4, y4)
+    denominator = (y4 - y3) * (x2 - x1) - (x4 - x3) * (y2 - y1)
+    return false if denominator == 0
 
-    until open_set.empty?
-      current = open_set.min_by { |cell| f_score[cell] }
-      return reconstruct_path(came_from, current) if current == goal
+    ua = ((x4 - x3) * (y1 - y3) - (y4 - y3) * (x1 - x3)).to_f / denominator
+    ub = ((x2 - x1) * (y1 - y3) - (y2 - y1) * (x1 - x3)).to_f / denominator
 
-      open_set.delete(current)
-      neighbors(current).each do |neighbor|
-        tentative_g_score = g_score[current] + heuristic(current, neighbor)
-        if tentative_g_score < g_score[neighbor]
-          came_from[neighbor] = current
-          g_score[neighbor] = tentative_g_score
-          f_score[neighbor] = g_score[neighbor] + heuristic(neighbor, goal)
-          open_set.add(neighbor)
-        end
+    ua.between?(0, 1) && ub.between?(0, 1)
+  end
+
+  def split(obstacles, factory, max_level = MAX_RECURSION_LEVEL)
+    return if @level >= max_level
+    return if fully_inside_obstacle?(obstacles, factory)
+    
+    if intersects_obstacle?(obstacles, factory)
+      half_width = width / 2.0
+      half_height = height / 2.0
+
+      @children = [
+        Cell.new(x, y, half_width, half_height, level + 1),
+        Cell.new(x + half_width, y, half_width, half_height, level + 1),
+        Cell.new(x, y + half_height, half_width, half_height, level + 1),
+        Cell.new(x + half_width, y + half_height, half_width, half_height, level + 1)
+      ]
+
+      @children.each { |child| child.split(obstacles, factory, max_level) }
+    end
+  end
+
+  def all_cells
+    if @children.empty?
+      [self]
+    else
+      @children.flat_map(&:all_cells)
+    end
+  end
+
+  def add_neighbor(other)
+    @neighbors << other unless @neighbors.include?(other)
+  end
+
+  def touches?(other)
+    (x <= other.x + other.width && x + width >= other.x) &&
+    (y <= other.y + other.height && y + height >= other.y)
+  end
+end
+
+def obstacle_between?(cell1, cell2, obstacles, factory)
+  steps = 5
+  (1..steps-1).each do |i|
+    t = i.to_f / steps
+    x = cell1.center[0] * (1 - t) + cell2.center[0] * t
+    y = cell1.center[1] * (1 - t) + cell2.center[1] * t
+    
+    point = factory.point(x, y)
+    obstacles.each do |obstacle|
+      return true if obstacle.contains?(point)
+    end
+  end
+  
+  false
+end
+
+def build_neighbor_graph(cells, obstacles, factory)
+  cells.each_with_index do |cell1, i|
+    cells[i+1..-1].each do |cell2|
+      if cell1.touches?(cell2) && !obstacle_between?(cell1, cell2, obstacles, factory)
+        cell1.add_neighbor(cell2)
+        cell2.add_neighbor(cell1)
       end
     end
-
-    return []
-  end
-
-  def reconstruct_path(came_from, current)
-    total_path = [current]
-    while came_from.key?(current)
-      current = came_from[current]
-      total_path << current
-    end
-    total_path.reverse
   end
 end
 
-class Visualization
-  def initialize(grid, path)
-    @grid = grid
-    @path = path
-    @path_index = 0
-    @path_squares = []
-    setup_window
-    draw_grid
-    draw_obstacles
-    draw_start_and_goal
-    start_animation
-  end
+def a_star(start_cell, goal_cell)
+  open_set = Set.new([start_cell])
+  came_from = {}
+  g_score = Hash.new(Float::INFINITY)
+  g_score[start_cell] = 0
+  f_score = Hash.new(Float::INFINITY)
+  f_score[start_cell] = heuristic(start_cell, goal_cell)
 
-  def setup_window
-    Window.set(
-      width: @grid.width,
-      height: @grid.height,
-      title: "Pathfinding Visualization",
-      background: 'black'
-    )
-  end
-
-  def draw_grid
-    (0...@grid.width).step(@grid.cell_size) do |x|
-      Line.new(x1: x, y1: 0, x2: x, y2: @grid.height, width: 1, color: 'gray')
-    end
-    (0...@grid.height).step(@grid.cell_size) do |y|
-      Line.new(x1: 0, y1: y, x2: @grid.width, y2: y, width: 1, color: 'gray')
+  until open_set.empty?
+    current = open_set.min_by { |cell| f_score[cell] }
+    
+    if current == goal_cell
+      return reconstruct_path(came_from, current)
     end
 
-    @grid.subcells.each_key do |x, y|
-      Line.new(
-        x1: (x + 0.5) * @grid.cell_size, y1: y * @grid.cell_size,
-        x2: (x + 0.5) * @grid.cell_size, y2: (y + 1) * @grid.cell_size,
-        width: 1, color: 'gray'
-      )
-      Line.new(
-        x1: x * @grid.cell_size, y1: (y + 0.5) * @grid.cell_size,
-        x2: (x + 1) * @grid.cell_size, y2: (y + 0.5) * @grid.cell_size,
-        width: 1, color: 'gray'
-      )
-    end
-  end
-
-def draw_obstacles
-  @grid.obstacles.each do |polygon|
-    points = polygon.exterior_ring.points
-    points.each_cons(2) do |p1, p2|
-      Line.new(
-        x1: p1.x, y1: p1.y,
-        x2: p2.x, y2: p2.y,
-        width: 2,
-        color: 'red'
-      )
-    end
-  end
-  @grid.subcells.each do |(x, y), subcells|
-    subcells.each_with_index do |allowed, i|
-      next if allowed
-
-      sub_x = x + (i % 2) * 0.5
-      sub_y = y + (i / 2) * 0.5
-      Square.new(
-        x: sub_x * @grid.cell_size,
-        y: sub_y * @grid.cell_size,
-        size: @grid.cell_size / 2,
-        color: [1, 0, 0, 0.3] 
-      )
-    end
-  end
-end
-
-  def draw_start_and_goal
-    start = @path.first
-    goal = @path.last
-    Square.new(
-      x: start[0] * @grid.cell_size,
-      y: start[1] * @grid.cell_size,
-      size: @grid.cell_size,
-      color: 'lime'
-    )
-    Square.new(
-      x: goal[0] * @grid.cell_size,
-      y: goal[1] * @grid.cell_size,
-      size: @grid.cell_size,
-      color: 'yellow'
-    )
-  end
-
-  def start_animation
-    @animation = true
-    Window.update do
-      update_animation
-    end
-  end
-
-  def update_animation
-    return unless @animation && @path_index < @path.size
-
-    current = @path[@path_index]
-    if current[0].is_a?(Float) || current[1].is_a?(Float)
-      x, y = current
-      base_x = x.floor
-      base_y = y.floor
-      sub_x = ((x - base_x) * 2).round
-      sub_y = ((y - base_y) * 2).round
+    open_set.delete(current)
+    
+    current.neighbors.each do |neighbor|
+      tentative_g_score = g_score[current] + distance(current, neighbor)
       
-      size = @grid.cell_size / 2
-      render_x = base_x * @grid.cell_size + sub_x * size
-      render_y = base_y * @grid.cell_size + sub_y * size
-    else
-      x, y = current
-      size = @grid.cell_size
-      render_x = x * @grid.cell_size
-      render_y = y * @grid.cell_size
+      if tentative_g_score < g_score[neighbor]
+        came_from[neighbor] = current
+        g_score[neighbor] = tentative_g_score
+        f_score[neighbor] = g_score[neighbor] + heuristic(neighbor, goal_cell)
+        open_set.add(neighbor) unless open_set.include?(neighbor)
+      end
     end
-
-    square = Square.new(
-      x: render_x,
-      y: render_y,
-      size: size,
-      color: 'blue',
-      z: 10
-    )
-    @path_squares << square
-
-    @path_index += 1
-    sleep(0.05)
-    Window.update { update_animation }
   end
 
-  def show
-    Window.show
+  nil
+end
+
+def heuristic(cell1, cell2)
+  dx = (cell1.center[0] - cell2.center[0]).abs
+  dy = (cell1.center[1] - cell2.center[1]).abs
+  Math.sqrt(dx*dx + dy*dy)
+end
+
+def distance(cell1, cell2)
+  heuristic(cell1, cell2)
+end
+
+def reconstruct_path(came_from, current)
+  total_path = [current]
+  while came_from.key?(current)
+    current = came_from[current]
+    total_path << current
+  end
+  total_path.reverse
+end
+
+obstacles = OBSTACLES_DATA.map { |points| 
+  points.map! { |x,y| [x.to_f, y.to_f] }
+  factory.polygon(factory.linear_ring(points.map { |x, y| factory.point(x, y) })) 
+}
+
+root = Cell.new(0, 0, MAP_WIDTH, MAP_HEIGHT)
+root.split(obstacles, factory)
+
+cells = root.all_cells.reject { |cell| cell.fully_inside_obstacle?(obstacles, factory) }
+
+build_neighbor_graph(cells, obstacles, factory)
+
+start_cell = cells.find { |cell| 
+  cell.x <= START_POINT[0] && START_POINT[0] < cell.x + cell.width &&
+  cell.y <= START_POINT[1] && START_POINT[1] < cell.y + cell.height
+}
+
+goal_cell = cells.find { |cell| 
+  cell.x <= GOAL_POINT[0] && GOAL_POINT[0] < cell.x + cell.width &&
+  cell.y <= GOAL_POINT[1] && GOAL_POINT[1] < cell.y + cell.height
+}
+
+path = a_star(start_cell, goal_cell)
+
+set title: "Pathfinding - #{cells.size} cells", 
+    width: MAP_WIDTH, 
+    height: MAP_HEIGHT, 
+    background: BACKGROUND_COLOR
+
+cells.each do |cell|
+  Rectangle.new(
+    x: cell.x, y: cell.y,
+    width: cell.width, height: cell.height,
+    color: 'black',
+    z: 1
+  )
+  
+  Line.new(
+    x1: cell.x, y1: cell.y,
+    x2: cell.x + cell.width, y2: cell.y,
+    width: 1,
+    color: CELL_BORDER_COLOR,
+    z: 1
+  )
+  Line.new(
+    x1: cell.x + cell.width, y1: cell.y,
+    x2: cell.x + cell.width, y2: cell.y + cell.height,
+    width: 1,
+    color: CELL_BORDER_COLOR,
+    z: 1
+  )
+  Line.new(
+    x1: cell.x + cell.width, y1: cell.y + cell.height,
+    x2: cell.x, y2: cell.y + cell.height,
+    width: 1,
+    color: CELL_BORDER_COLOR,
+    z: 1
+  )
+  Line.new(
+    x1: cell.x, y1: cell.y + cell.height,
+    x2: cell.x, y2: cell.y,
+    width: 1,
+    color: CELL_BORDER_COLOR,
+    z: 1
+  )
+end
+
+obstacles.each do |obstacle|
+  points = obstacle.exterior_ring.points.map { |p| [p.x, p.y] }
+  
+  (1..points.size-2).each do |i|
+    Triangle.new(
+      x1: points[0][0], y1: points[0][1],
+      x2: points[i][0], y2: points[i][1],
+      x3: points[i+1][0], y3: points[i+1][1],
+      color: OBSTACLE_COLOR,
+      z: 2
+    )
   end
 end
 
-# Пример использования
-width = 800
-height = 800
-cell_size = 10
-obstacles = [
-  [[0, 97], [0, 300], [372, 300], [243, 97]], 
-  [[600, 200], [600, 250], [700, 250], [700, 200]], 
-  [[0, 600], [0, 700], [300, 700], [300, 600]], 
-  [[500, 100], [500, 150], [600, 150], [600, 100]], 
-  [[405, 503], [195, 503], [195, 553], [405, 553]], 
-  [[400, 400], [800, 400], [800, 700], [300, 785]]  
-]
-start = [1, 1]
-goal = [78, 71] 
+Circle.new(
+  x: START_POINT[0], y: START_POINT[1],
+  radius: POINT_RADIUS, color: START_COLOR, sectors: 32,
+  z: 4
+)
+Circle.new(
+  x: GOAL_POINT[0], y: GOAL_POINT[1],
+  radius: POINT_RADIUS, color: GOAL_COLOR, sectors: 32,
+  z: 4
+)
 
-grid = Grid.new(width, height, cell_size, obstacles)
-path = grid.a_star(start, goal)
+if path
+  path_segments = []
+  current_index = 0
+  last_time = Time.now
 
-app = Visualization.new(grid, path)
-app.show
+  update do
+    if path && current_index < path.size - 1
+      if Time.now - last_time >= ANIMATION_SPEED
+        cell1 = path[current_index]
+        cell2 = path[current_index + 1]
+        
+        segment = Line.new(
+          x1: cell1.center[0], y1: cell1.center[1],
+          x2: cell2.center[0], y2: cell2.center[1],
+          width: PATH_WIDTH,
+          color: PATH_COLOR,
+          z: 3
+        )
+        path_segments << segment
+        current_index += 1
+        last_time = Time.now
+      end
+    end
+  end
+end
+
+show
